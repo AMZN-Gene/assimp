@@ -847,6 +847,16 @@ aiNode *USDImporterImplTinyusdz::nodesRecursive(
     cNode->mParent = pNodeParent;
     cNode->mName.Set(node.prim_name);
     cNode->mTransformation = tinyUsdzMat4ToAiMat4(node.local_matrix.m);
+
+    // @todo Parse the tinyusdz::Stage for reference nodes
+    const bool containsReference = node.prim_name.find("Wheel_") != std::string::npos;
+    if (containsReference) {
+        constexpr unsigned int numProperties = 2;  // 2 properties: "reference asset_path" and "reference prim_path"
+        cNode->mMetaData = aiMetadata::Alloc(numProperties);
+        cNode->mMetaData->Set(0, "RefAssetPath", aiString("./Wheel.usda"));
+        cNode->mMetaData->Set(1, "RefPrimPath", aiString(""));
+    }
+
     ss.str("");
     ss << "nodesRecursive(): node " << cNode->mName.C_Str() <<
             " type: |" << tinyusdzNodeTypeFor(node.nodeType) <<
