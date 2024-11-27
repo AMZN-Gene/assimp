@@ -126,14 +126,17 @@ public:
 
     void setupNodes(
             const tinyusdz::tydra::RenderScene &render_scene,
+            const tinyusdz::Layer &root_layer,
             aiScene *pScene,
             const std::string &nameWExt);
 
     aiNode *nodes(
             const tinyusdz::tydra::RenderScene &render_scene,
+            const tinyusdz::Layer &root_layer,
             const std::string &nameWExt);
 
     aiNode *nodesRecursive(
+            const tinyusdz::Layer &root_layer,
             aiNode *pNodeParent,
             const tinyusdz::tydra::Node &node,
             const std::vector<tinyusdz::tydra::SkelHierarchy> &skeletons);

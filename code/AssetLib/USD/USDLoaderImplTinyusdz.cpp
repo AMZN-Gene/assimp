@@ -72,6 +72,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include "../../../contrib/tinyusdz/assimp_tinyusdz_logging.inc"
 
+#pragma optimize("",off)
 namespace {
     static constexpr char TAG[] = "tinyusdz loader";
 }
@@ -212,6 +213,28 @@ void USDImporterImplTinyusdz::InternReadFile(
         return;
     }
 
+
+    // Load root layer without loading geometry
+    // Unlike stages, layers contain information about composition (references, payloads, etc)
+    tinyusdz::Layer root_layer;
+    tinyusdz::USDLoadOptions load_options;
+    load_options.load_assets = false; // Don't load geometry into the layer; render_scene has already loaded assets 
+
+    if (!LoadLayerFromFile(pFile, &root_layer, &warn, &err))
+    {
+        if (!warn.empty()) {
+        ss.str("");
+        ss << "InternReadFile(): LoadLayerFromFile: WARNING reported: " << warn;
+        TINYUSDZLOGW(TAG, "%s", ss.str().c_str());
+        }
+        if (!err.empty()) {
+            ss.str("");
+            ss << "InternReadFile(): LoadLayerFromFile failed! ERROR reported: " << err;
+            TINYUSDZLOGE(TAG, "%s", ss.str().c_str());
+            return;
+        }
+    }
+
     // sanityCheckNodesRecursive(pScene->mRootNode);
     animations(render_scene, pScene);
     meshes(render_scene, pScene, nameWExt);
@@ -220,7 +243,7 @@ void USDImporterImplTinyusdz::InternReadFile(
     textureImages(render_scene, pScene, nameWExt);
     buffers(render_scene, pScene, nameWExt);
 
-    setupNodes(render_scene, pScene, nameWExt);
+    setupNodes(render_scene, root_layer, pScene, nameWExt);
 
     setupBlendShapes(render_scene, pScene, nameWExt);
 }
@@ -799,11 +822,12 @@ void USDImporterImplTinyusdz::buffers(
 
 void USDImporterImplTinyusdz::setupNodes(
         const tinyusdz::tydra::RenderScene &render_scene,
+        const tinyusdz::Layer &root_layer,
         aiScene *pScene,
         const std::string &nameWExt) {
     stringstream ss;
 
-    pScene->mRootNode = nodes(render_scene, nameWExt);
+    pScene->mRootNode = nodes(render_scene, root_layer, nameWExt);
     if (pScene->mRootNode == nullptr) {
         return;
     }
@@ -823,6 +847,7 @@ void USDImporterImplTinyusdz::setupNodes(
 
 aiNode *USDImporterImplTinyusdz::nodes(
         const tinyusdz::tydra::RenderScene &render_scene,
+        const tinyusdz::Layer &root_layer,
         const std::string &nameWExt) {
     const size_t numNodes{render_scene.nodes.size()};
     (void) numNodes; // Ignore unused variable when -Werror enabled
@@ -831,7 +856,7 @@ aiNode *USDImporterImplTinyusdz::nodes(
     ss << "nodes(): model" << nameWExt << ", numNodes: " << numNodes;
     TINYUSDZLOGD(TAG, "%s", ss.str().c_str());
 
-    aiNode *rootNode = nodesRecursive(nullptr, render_scene.nodes[0], render_scene.skeletons);
+    aiNode *rootNode = nodesRecursive(root_layer, nullptr, render_scene.nodes[0], render_scene.skeletons);
     return rootNode;
 }
 
@@ -839,6 +864,7 @@ using Assimp::tinyusdzNodeTypeFor;
 using Assimp::tinyUsdzMat4ToAiMat4;
 using tinyusdz::tydra::NodeType;
 aiNode *USDImporterImplTinyusdz::nodesRecursive(
+        const tinyusdz::Layer &root_layer,
         aiNode *pNodeParent,
         const tinyusdz::tydra::Node &node,
         const std::vector<tinyusdz::tydra::SkelHierarchy> &skeletons) {
@@ -848,13 +874,29 @@ aiNode *USDImporterImplTinyusdz::nodesRecursive(
     cNode->mName.Set(node.prim_name);
     cNode->mTransformation = tinyUsdzMat4ToAiMat4(node.local_matrix.m);
 
-    // @todo Parse the tinyusdz::Stage for reference nodes
-    const bool containsReference = node.prim_name.find("Wheel_") != std::string::npos;
-    if (containsReference) {
-        constexpr unsigned int numProperties = 2;  // 2 properties: "reference asset_path" and "reference prim_path"
-        cNode->mMetaData = aiMetadata::Alloc(numProperties);
-        cNode->mMetaData->Set(0, "RefAssetPath", aiString("./Wheel.usda"));
-        cNode->mMetaData->Set(1, "RefPrimPath", aiString(""));
+    // USD Composition Arc
+    // Check if this node contains a reference to another USD file
+    const tinyusdz::PrimSpec *primSpec;
+    std::string err;
+    if (root_layer.find_primspec_at(tinyusdz::Path(node.abs_path, ""), &primSpec, &err)) {
+        if (primSpec->metas().references.has_value()) {
+            const std::vector<tinyusdz::Reference>& references = primSpec->metas().references->second;
+
+            // 2 properties per reference: "reference asset_path" and "reference prim_path"
+            const unsigned int numReferences = references.size();
+            const unsigned int numProperties = 2 * numReferences;
+            cNode->mMetaData = aiMetadata::Alloc(numProperties);
+
+            // A node may contain multiple references
+            // Metadata doesn't support serializing an array so keys are appended with the reference index: Example RefAssetPath_0, _1, _2, etc
+            for (int referenceIndex = 0; referenceIndex < numReferences; ++referenceIndex) {
+                const tinyusdz::Reference &reference = references[referenceIndex];
+                const std::string referenceAsset = reference.asset_path.GetAssetPath();
+
+                cNode->mMetaData->Set(referenceIndex * 2, "RefAssetPath_" + std::to_string(referenceIndex), aiString(referenceAsset));
+                cNode->mMetaData->Set(referenceIndex * 2 + 1, "RefPrimPath_" + std::to_string(referenceIndex), aiString(""));
+            }
+        }
     }
 
     ss.str("");
@@ -895,7 +937,7 @@ aiNode *USDImporterImplTinyusdz::nodesRecursive(
 
     size_t i{ 0 };
     for (const auto &childNode : node.children) {
-        cNode->mChildren[i] = nodesRecursive(cNode, childNode, skeletons);
+        cNode->mChildren[i] = nodesRecursive(root_layer, cNode, childNode, skeletons);
         ++i;
     }
 
@@ -1009,3 +1051,4 @@ void USDImporterImplTinyusdz::blendShapesForMesh(
 } // namespace Assimp
 
 #endif // !! ASSIMP_BUILD_NO_USD_IMPORTER
+#pragma optimize("", on)
